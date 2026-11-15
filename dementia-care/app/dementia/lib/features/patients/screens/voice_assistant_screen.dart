@@ -2,7 +2,9 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../services/local_assistant.dart';
 import '../services/voice_assistant_service.dart';
 
 class VoiceAssistantScreen extends StatefulWidget {
@@ -92,20 +94,30 @@ class _VoiceAssistantScreenState extends State<VoiceAssistantScreen> {
     try {
       // --- NEW AI TOUCH: Unified Firestore-driven flow ---
       // The service now handles writing, listening, timeout (15s), and fallbacks internally!
-      final response = await VoiceAssistantService.getAiCompanionResponse(
-        userQuery: query,
-        uid: 'patient_123', // TODO: Replace with FirebaseAuth.instance.currentUser?.uid ?? 'guest'
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+
+      // Everyday questions are answered on the phone itself, so the companion
+      // keeps working offline or when the AI backend is not reachable.
+      var response = await LocalAssistant.tryAnswer(
+        query: query,
         isHindi: widget.isHindi,
       );
-      
-      replyText = response.reply;
 
-      // Handle quick call action (e.g., "call aarav" or action: call:Aarav)
-      final lowerQuery = query.toLowerCase();
-      final lowerReply = replyText.toLowerCase();
-      if (lowerQuery.contains('aarav') || lowerQuery.contains('आरव') || lowerReply.startsWith('call:')) {
-        final callUri = Uri.parse('tel:+919876543210');
-        if (await canLaunchUrl(callUri)) {
+      if (response == null && uid != null && uid.isNotEmpty) {
+        response = await VoiceAssistantService.getAiCompanionResponse(
+          userQuery: query,
+          uid: uid,
+          isHindi: widget.isHindi,
+        );
+      }
+      
+      replyText = response?.reply ?? kindFallback;
+
+      final action = response?.action ?? 'none';
+      if (action.startsWith('call:')) {
+        final number = action.substring('call:'.length).trim();
+        final callUri = Uri(scheme: 'tel', path: number);
+        if (number.isNotEmpty && await canLaunchUrl(callUri)) {
           await launchUrl(callUri);
         }
       }

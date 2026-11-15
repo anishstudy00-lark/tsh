@@ -177,6 +177,7 @@ class _ConsentAndGeofenceScreenState extends State<ConsentAndGeofenceScreen> {
         .collection('alerts')
         .add({
       'type': 'geofence',
+      'time': FieldValue.serverTimestamp(),
       'status': 'unread',
       'message': 'Patient stepped outside the designated Safe Zone.',
       'distanceMeters': _lastDistanceMeters?.round(),

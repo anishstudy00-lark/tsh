@@ -7,6 +7,20 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function patientData(pid) {
+      return get(/databases/$(database)/documents/patients/$(pid)).data;
+    }
+
+    function isCaregiverOf(pid) {
+      return isAuthenticated()
+        && patientData(pid).caregivers is list
+        && patientData(pid).caregivers.hasAny([request.auth.uid]);
+    }
+
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
     // Admin-only collections (Blocked from clients; Python backend uses Admin SDK)
     match /pairingCodes/{doc} {
       allow read, write: if false;
@@ -15,60 +29,117 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Users: Allow users to read/write their own user document during registration & app use
+    // Users: each account owns exactly one profile document.
     match /users/{userId} {
       allow read, write: if isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Patients
-    match /patients/{pid} {
+    // Pairing as the app performs it: the patient writes a short-lived code,
+    // the caregiver asks to link, and the patient approves the request.
+    match /pairing_codes/{code} {
+      // Any signed-in user may look up a code; the six digits are the secret.
       allow read: if isAuthenticated();
-      
-      allow create: if isAuthenticated() 
-        && request.auth.uid == pid 
-        && request.resource.data.caregivers is list 
-        && request.resource.data.caregivers.size() == 0;
-      
-      allow update: if isAuthenticated() && (
-        (request.auth.uid == pid && 
-         request.resource.data.diff().affectedKeys().hasOnly(['name', 'safeZone', 'lastLocation', 'battery', 'lastSeen'])) ||
-        (request.resource.data.diff().affectedKeys().hasOnly(['safeZone']) && 
-         resource.data.caregivers.hasAny([request.auth.uid]))
+      allow create: if isAuthenticated()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'active'
+        && request.resource.data.keys().hasOnly(['uid', 'status', 'createdAt']);
+      allow update: if isAuthenticated()
+        && resource.data.uid == request.auth.uid
+        && changedKeys().hasOnly(['status']);
+      allow delete: if isAuthenticated() && resource.data.uid == request.auth.uid;
+    }
+
+    match /pairing_requests/{id} {
+      allow create: if isAuthenticated()
+        && request.resource.data.caregiverUid == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.code is string
+        && request.resource.data.keys().hasOnly(['code', 'caregiverUid', 'status', 'createdAt']);
+
+      // The caregiver who asked, and the patient who owns the code, can read it.
+      allow read: if isAuthenticated() && (
+        resource.data.caregiverUid == request.auth.uid
+        || get(/databases/$(database)/documents/pairing_codes/$(resource.data.code)).data.uid == request.auth.uid
       );
+
+      // Only the patient can approve or deny.
+      allow update: if isAuthenticated()
+        && get(/databases/$(database)/documents/pairing_codes/$(resource.data.code)).data.uid == request.auth.uid
+        && changedKeys().hasOnly(['status', 'pid', 'patientName']);
+
+      allow delete: if isAuthenticated() && resource.data.caregiverUid == request.auth.uid;
+    }
+
+    // Patients and everything that belongs to them.
+    match /patients/{pid} {
+      allow read: if isAuthenticated() && (request.auth.uid == pid || isCaregiverOf(pid));
+
+      allow create: if isAuthenticated()
+        && request.auth.uid == pid
+        && (!request.resource.data.keys().hasAny(['caregivers'])
+            || (request.resource.data.caregivers is list
+                && request.resource.data.caregivers.size() == 0));
+
+      allow update: if isAuthenticated() && (
+        // The patient edits their own profile, location and consent. Caregivers
+        // can only be ADDED this way, so the patient cannot lose access by
+        // accident.
+        (request.auth.uid == pid
+          && (!changedKeys().hasAny(['caregivers'])
+              || (request.resource.data.caregivers is list
+                  && (!resource.data.keys().hasAny(['caregivers'])
+                      || (resource.data.caregivers is list
+                          && request.resource.data.caregivers.toSet()
+                               .hasAll(resource.data.caregivers))))))
+
+        // A linked caregiver may change the safe zone...
+        || (isCaregiverOf(pid) && changedKeys().hasOnly(['safeZone']))
+
+        // ...or remove their own access (and never add anyone else).
+        || (isCaregiverOf(pid)
+          && changedKeys().hasOnly(['caregivers'])
+          && request.resource.data.caregivers is list
+          && !request.resource.data.caregivers.hasAny([request.auth.uid])
+          && resource.data.caregivers.toSet()
+               .hasAll(request.resource.data.caregivers))
+      );
+
       allow delete: if false;
 
       match /alerts/{id} {
-        allow read: if isAuthenticated() && (request.auth.uid == pid || resource.data.caregivers.hasAny([request.auth.uid]));
+        allow read: if isAuthenticated() && (request.auth.uid == pid || isCaregiverOf(pid));
         allow create: if isAuthenticated() && request.auth.uid == pid;
-        allow update: if isAuthenticated() 
-          && resource.data.caregivers.hasAny([request.auth.uid])
-          && request.resource.data.diff().affectedKeys().hasOnly(['ackedBy', 'ackedAt']);
+        allow update: if isAuthenticated()
+          && isCaregiverOf(pid)
+          && changedKeys().hasOnly(['ackedBy', 'ackedAt']);
         allow delete: if false;
       }
 
       match /sessions/{id} {
-        allow read: if isAuthenticated();
+        allow read: if isAuthenticated() && (request.auth.uid == pid || isCaregiverOf(pid));
         allow create, update: if isAuthenticated() && request.auth.uid == pid;
         allow delete: if false;
       }
+
       match /daily/{date} {
-        allow read: if isAuthenticated();
+        allow read: if isAuthenticated() && (request.auth.uid == pid || isCaregiverOf(pid));
         allow write: if false;
       }
 
       match /reminders/{id} {
-        allow read: if isAuthenticated() && request.auth.uid == pid;
-        allow write: if isAuthenticated(); 
+        allow read, write: if isAuthenticated()
+          && (request.auth.uid == pid || isCaregiverOf(pid));
       }
+
       match /contacts/{id} {
-        allow read: if isAuthenticated() && request.auth.uid == pid;
-        allow write: if isAuthenticated();
+        allow read, write: if isAuthenticated()
+          && (request.auth.uid == pid || isCaregiverOf(pid));
       }
     }
 
-    // Request Docs
+    // Request Docs (kept for the Python pairing workers and the rules tests)
     match /pairingRequests/{id} {
-      allow create: if isAuthenticated() 
+      allow create: if isAuthenticated()
         && request.auth.uid == request.resource.data.uid
         && request.resource.data.keys().hasOnly(['uid', 'type', 'createdAt'])
         && request.resource.data.type == 'create';
@@ -77,15 +148,16 @@ service cloud.firestore {
     }
 
     match /linkRequests/{id} {
-      allow create: if isAuthenticated() 
+      allow create: if isAuthenticated()
         && request.auth.uid == request.resource.data.uid
         && request.resource.data.keys().hasOnly(['uid', 'code', 'createdAt']);
       allow read: if isAuthenticated() && resource.data.uid == request.auth.uid;
       allow update, delete: if false;
     }
 
+    // Assistant requests: the patient writes a question, the backend answers it.
     match /assistantRequests/{id} {
-      allow create: if isAuthenticated() 
+      allow create: if isAuthenticated()
         && request.auth.uid == request.resource.data.uid
         && request.resource.data.keys().hasOnly(['uid', 'text', 'language', 'history', 'createdAt']);
       allow read: if isAuthenticated() && resource.data.uid == request.auth.uid;

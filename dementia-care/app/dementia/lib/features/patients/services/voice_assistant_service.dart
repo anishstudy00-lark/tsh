@@ -39,6 +39,9 @@ class VoiceAssistantService {
       action: 'none',
     );
 
+    // The backend only accepts requests written as the signed-in patient.
+    if (uid.isEmpty) return fallback;
+
     try {
       // 1. Write request to Firestore adhering strictly to security rules
       final requestId = await _sendRequestToAI(
@@ -98,12 +101,14 @@ class VoiceAssistantService {
       final data = snapshot.data();
       if (data == null) return;
 
-      // When Python backend writes the 'reply' field, consider it completed
-      if (data.containsKey('reply') && data['reply'] != null) {
+      // The Python backend writes the answer as 'reply' (older builds used
+      // 'response'); accept either so the assistant keeps working.
+      final replyValue = data['reply'] ?? data['response'];
+      if (replyValue != null) {
         if (!completer.isCompleted) {
           completer.complete(
             VoiceAssistantResponse(
-              reply: data['reply'].toString(),
+              reply: replyValue.toString(),
             ),
           );
         }
@@ -126,8 +131,8 @@ class VoiceAssistantService {
       final result = await completer.future;
       return result;
     } finally {
-      timer?.cancel();
-      await sub?.cancel();
+      timer.cancel();
+      await sub.cancel();
     }
   }
 

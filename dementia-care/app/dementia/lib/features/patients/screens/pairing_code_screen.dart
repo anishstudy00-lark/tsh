@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math';
+
 import 'package:material_ui/material_ui.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -17,14 +18,35 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
   bool _isLoading = false;
   bool _linked = false;
   int _secondsRemaining = 600; // 10 minutes
+  String _patientName = 'Patient';
   Timer? _countdownTimer;
   StreamSubscription<QuerySnapshot>? _requestSubscription;
 
   @override
   void initState() {
     super.initState();
+    _loadPatientName();
     _generateCode();
     _startCountdown();
+  }
+
+  /// Uses the name saved on the profile so the caregiver sees a real name
+  /// instead of a placeholder when the link is approved.
+  Future<void> _loadPatientName() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('patients')
+          .doc(uid)
+          .get();
+      final name = (doc.data()?['name'] as String?)?.trim();
+      if (name != null && name.isNotEmpty && mounted) {
+        setState(() => _patientName = name);
+      }
+    } catch (_) {
+      // Keep the calm fallback name; pairing still works.
+    }
   }
 
   @override
@@ -72,10 +94,10 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
             .collection('pairing_codes')
             .doc(digits)
             .set({
-          'uid': uid,
-          'status': 'active',
-          'createdAt': FieldValue.serverTimestamp(),
-        });
+              'uid': uid,
+              'status': 'active',
+              'createdAt': FieldValue.serverTimestamp(),
+            });
       } catch (_) {
         // Offline: the code still shows, but the caregiver will get
         // 'not-found' — acceptable degradation for a pairing flow.
@@ -93,7 +115,7 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
 
   /// Watches for a caregiver request doc carrying this exact code and
   /// approves it while the timer is still running.
-      void _listenForPairingRequests(String cleanCode) {
+  void _listenForPairingRequests(String cleanCode) {
     _requestSubscription?.cancel();
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return;
@@ -103,55 +125,61 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
         .where('code', isEqualTo: cleanCode)
         .where('status', isEqualTo: 'pending')
         .snapshots()
-        .listen((snapshot) async {
-      if (_secondsRemaining <= 0) return;
+        .listen(
+          (snapshot) async {
+            if (_secondsRemaining <= 0) return;
 
-      for (final doc in snapshot.docs) {
-        final caregiverUid = doc.data()['caregiverUid'] as String;
+            for (final doc in snapshot.docs) {
+              final caregiverUid = doc.data()['caregiverUid'] as String;
 
-        try {
-          // ✅ 1. FORCE SAVE THE LINK. 
-          // SetOptions(merge: true) creates the doc if it's missing, 
-          // or safely adds to the array if it exists.
-          await FirebaseFirestore.instance
-              .collection('patients')
-              .doc(uid)
-              .set(
-                {'caregivers': FieldValue.arrayUnion([caregiverUid])},
-                SetOptions(merge: true),
-              );
+              try {
+                // ✅ 1. FORCE SAVE THE LINK.
+                // The first merge keeps the patient document without caregivers
+                // (allowed on create); the update then adds the caregiver.
+                final patientRef = FirebaseFirestore.instance
+                    .collection('patients')
+                    .doc(uid);
+                await patientRef.set({
+                  'name': _patientName,
+                }, SetOptions(merge: true));
+                await patientRef.update({
+                  'caregivers': FieldValue.arrayUnion([caregiverUid]),
+                });
 
-          // ✅ 2. Approve the request so the caregiver's app knows it succeeded
-          await doc.reference.update({
-            'status': 'approved',
-            'pid': uid,
-            'patientName': _patientName, 
-          });
+                // ✅ 2. Approve the request so the caregiver's app knows it succeeded
+                await doc.reference.update({
+                  'status': 'approved',
+                  'pid': uid,
+                  'patientName': _patientName,
+                });
 
-          // ✅ 3. Retire the code so it can't be reused
-          await _retireCurrentCode('used');
-          
-          // ✅ 4. Clean up
-          _requestSubscription?.cancel();
-          _countdownTimer?.cancel();
-          
-          if (mounted) {
-            setState(() => _linked = true);
-          }
-          
-          print('✅ [PATIENT] SUCCESS: Linked caregiver $caregiverUid to patient $uid');
-          
-        } catch (e) {
-          print('❌ [PATIENT] FAILED to save link: $e');
-          // If saving fails, deny the request so the caregiver doesn't hang forever
-          await doc.reference.update({'status': 'denied'});
-        }
-      }
-    }, onError: (e) {
-      print('❌ [PATIENT] Query Error: $e');
-    });
+                // ✅ 3. Retire the code so it can't be reused
+                await _retireCurrentCode('used');
+
+                // ✅ 4. Clean up
+                _requestSubscription?.cancel();
+                _countdownTimer?.cancel();
+
+                if (mounted) {
+                  setState(() => _linked = true);
+                }
+
+                print(
+                  '✅ [PATIENT] SUCCESS: Linked caregiver $caregiverUid to patient $uid',
+                );
+              } catch (e) {
+                print('❌ [PATIENT] FAILED to save link: $e');
+                // If saving fails, deny the request so the caregiver doesn't hang forever
+                await doc.reference.update({'status': 'denied'});
+              }
+            }
+          },
+          onError: (e) {
+            print('❌ [PATIENT] Query Error: $e');
+          },
+        );
   }
-  
+
   Future<void> _retireCurrentCode(String status) async {
     final clean = _pairingCode.replaceAll(RegExp(r'\D'), '');
     if (clean.length != 6) return;
@@ -162,9 +190,6 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
           .update({'status': status});
     } catch (_) {}
   }
-
-  // TODO: replace with the real name from your user profile / auth state.
-  String get _patientName => 'Patient';
 
   Future<void> _refreshCode() async {
     _requestSubscription?.cancel();
@@ -191,9 +216,15 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
           children: [
             if (_linked)
               Text(
-                _t('Caregiver linked successfully!', 'देखभालकर्ता सफलतापूर्वक जुड़ गए!'),
+                _t(
+                  'Caregiver linked successfully!',
+                  'देखभालकर्ता सफलतापूर्वक जुड़ गए!',
+                ),
                 style: const TextStyle(
-                    fontSize: 26, fontWeight: FontWeight.bold, color: Colors.tealAccent),
+                  fontSize: 26,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.tealAccent,
+                ),
                 textAlign: TextAlign.center,
               )
             else ...[
@@ -207,8 +238,10 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
               ),
               const SizedBox(height: 28),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
+                padding: const EdgeInsets.symmetric(
+                  vertical: 28,
+                  horizontal: 16,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.blueGrey.shade900,
                   borderRadius: BorderRadius.circular(20),
@@ -219,11 +252,16 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
                 ),
                 child: _isLoading
                     ? const Center(
-                        child: CircularProgressIndicator(color: Colors.tealAccent))
+                        child: CircularProgressIndicator(
+                          color: Colors.tealAccent,
+                        ),
+                      )
                     : Column(
                         children: [
                           Text(
-                            isExpired ? _t('EXPIRED', 'समय समाप्त') : _pairingCode,
+                            isExpired
+                                ? _t('EXPIRED', 'समय समाप्त')
+                                : _pairingCode,
                             style: TextStyle(
                               fontSize: 46,
                               fontWeight: FontWeight.bold,
@@ -237,12 +275,18 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
                           const SizedBox(height: 12),
                           Text(
                             isExpired
-                                ? _t('Tap below for a new code',
-                                    'नए कोड के लिए नीचे दबाएँ')
-                                : _t('Expires in $_formattedTimer',
-                                    '$_formattedTimer में समाप्त होगा'),
+                                ? _t(
+                                    'Tap below for a new code',
+                                    'नए कोड के लिए नीचे दबाएँ',
+                                  )
+                                : _t(
+                                    'Expires in $_formattedTimer',
+                                    '$_formattedTimer में समाप्त होगा',
+                                  ),
                             style: const TextStyle(
-                                fontSize: 18, color: Colors.white70),
+                              fontSize: 18,
+                              color: Colors.white70,
+                            ),
                           ),
                         ],
                       ),
@@ -254,16 +298,22 @@ class _PairingCodeScreenState extends State<PairingCodeScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.teal.shade700,
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
                   ),
                   onPressed: _isLoading ? null : _refreshCode,
-                  icon: const Icon(Icons.refresh, size: 32, color: Colors.white),
+                  icon: const Icon(
+                    Icons.refresh,
+                    size: 32,
+                    color: Colors.white,
+                  ),
                   label: Text(
                     _t('Generate New Code', 'नया कोड बनाएँ'),
                     style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white),
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
               ),

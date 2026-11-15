@@ -1,14 +1,15 @@
 import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
-import '../../../core/theme.dart';
 import '../services/sos_service.dart';
 import '../services/location_service.dart';
 import 'game1_screen.dart';
 import 'game2_screen.dart';
+import 'story_game_screen.dart';
 import 'pairing_code_screen.dart';
 import 'consent_and_geofence_screen.dart';
 import 'patient_reminders_screen.dart';
@@ -150,27 +151,44 @@ class _PatientHomeScreenState extends State<PatientHomeScreen> {
     if (confirm != true) return;
 
     setState(() => _isSendingSos = true);
-    final triggered = await SosService.triggerEmergencySos();
+    final result = await SosService.triggerEmergencySos();
 
     if (!mounted) return;
     setState(() => _isSendingSos = false);
 
+    final String message;
+    if (result.alertQueued && result.smsOpened) {
+      message = _t(
+        'SOS sent. Your caregiver was alerted and a text message is open.',
+        'SOS भेजा गया। देखभालकर्ता को सूचना दी गई और संदेश खुल रहा है।',
+      );
+    } else if (result.alertQueued) {
+      message = _t(
+        'SOS sent. Your caregiver has been alerted.',
+        'SOS भेजा गया। आपके देखभालकर्ता को सूचना दे दी गई है।',
+      );
+    } else if (result.smsOpened) {
+      message = _t(
+        'Opened a text message to your caregiver. Please send it.',
+        'देखभालकर्ता के लिए संदेश खुल गया है। कृपया उसे भेजें।',
+      );
+    } else {
+      message = _t(
+        'Could not send SOS. Please call your caregiver now.',
+        'SOS नहीं भेजा जा सका। कृपया अभी देखभालकर्ता को कॉल करें।',
+      );
+    }
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          triggered
-              ? _t(
-                  'Emergency SOS sent! Opening SMS backup...',
-                  'आपातकालीन SOS भेजा गया! SMS खुल रहा है...',
-                )
-              : _t(
-                  'Could not send SOS. Please call your caregiver.',
-                  'SOS नहीं भेजा जा सका। कृपया देखभालकर्ता को कॉल करें।',
-                ),
+          message,
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
         ),
-        backgroundColor: Colors.amber.shade900,
-        duration: const Duration(seconds: 4),
+        backgroundColor: result.reachedSomeone
+            ? Colors.teal.shade800
+            : Colors.amber.shade900,
+        duration: const Duration(seconds: 5),
       ),
     );
   }
@@ -216,7 +234,11 @@ class _PatientHomeScreenState extends State<PatientHomeScreen> {
                     ),
                   );
                 },
-                icon: const Icon(Icons.grid_view_rounded, size: 32, color: Colors.white),
+                icon: const Icon(
+                  Icons.grid_view_rounded,
+                  size: 32,
+                  color: Colors.white,
+                ),
                 label: Text(
                   _t('Memory Pairs', 'चित्र जोड़ी मिलान'),
                   style: const TextStyle(
@@ -246,9 +268,47 @@ class _PatientHomeScreenState extends State<PatientHomeScreen> {
                     ),
                   );
                 },
-                icon: const Icon(Icons.shopping_basket, size: 32, color: Colors.white),
+                icon: const Icon(
+                  Icons.shopping_basket,
+                  size: 32,
+                  color: Colors.white,
+                ),
                 label: Text(
                   _t('Shopping Basket', 'खरीदारी की टोकरी'),
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 68,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.deepPurple.shade600,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                ),
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => StoryGameScreen(isHindi: _isHindi),
+                    ),
+                  );
+                },
+                icon: const Icon(
+                  Icons.auto_stories,
+                  size: 32,
+                  color: Colors.white,
+                ),
+                label: Text(
+                  _t('Story Time', 'कहानी का समय'),
                   style: const TextStyle(
                     fontSize: 22,
                     fontWeight: FontWeight.bold,
