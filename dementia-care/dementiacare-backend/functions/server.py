@@ -79,6 +79,8 @@ def process_assistant_requests():
 
         doc.reference.update({
             "status": "completed",
+            # The app listens for 'reply'; 'response' is kept for older builds.
+            "reply": reply,
             "response": reply,
             "completedAt": datetime.now(timezone.utc)
         })
